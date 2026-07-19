@@ -1063,7 +1063,7 @@ const Transport = {
         Render.draw(GameState);
         updateRoomButtonUI(); // flip button back to "Join"
       }
-    }, 5000);
+    }, 15000);
 
     Transport.room.onPeerJoin((peerId) => {
       clearTimeout(probeTimeoutId); // someone joined, stay connected
