@@ -1053,7 +1053,20 @@ const Transport = {
       const peerIds = Object.keys(Transport.room.getPeers());
       handleBridgeEvent("peers", peerIds);
     };
+
+    // 5-second probe: if nobody joins by then, auto-leave. This is a connection
+    // *request*, not a persistent join — meant for synchronous over-call use.
+    let probeTimeoutId = setTimeout(() => {
+      if (Transport.room && Object.keys(Transport.room.getPeers()).length === 0) {
+        Transport.leave();
+        reconcilePeers([]);
+        Render.draw(GameState);
+        updateRoomButtonUI(); // flip button back to "Join"
+      }
+    }, 5000);
+
     Transport.room.onPeerJoin((peerId) => {
+      clearTimeout(probeTimeoutId); // someone joined, stay connected
       emitPeers();
       // A newly-joined peer doesn't know our name yet — tell just them,
       // mirroring the old "announce username on connect" behavior.
@@ -1122,8 +1135,15 @@ const Store = {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(Store.STORE, "readonly");
       const req = tx.objectStore(Store.STORE).get(key);
-      req.onsuccess = () => resolve(req.result === undefined ? null : req.result);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const result = req.result === undefined ? null : req.result;
+        console.log(`Store.get("${key}"):`, result);
+        resolve(result);
+      };
+      req.onerror = () => {
+        console.error(`Store.get("${key}") error:`, req.error);
+        reject(req.error);
+      };
     });
   },
 
@@ -1131,9 +1151,17 @@ const Store = {
     const db = await Store._open();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(Store.STORE, "readwrite");
-      tx.objectStore(Store.STORE).put(value, key);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
+      const req = tx.objectStore(Store.STORE).put(value, key);
+      req.onsuccess = () => console.log(`Store.set("${key}") written`);
+      req.onerror = () => console.error(`Store.set("${key}") error:`, req.error);
+      tx.oncomplete = () => {
+        console.log(`Store transaction complete for ("${key}", ...)`);
+        resolve();
+      };
+      tx.onerror = () => {
+        console.error(`Store transaction error for ("${key}", ...):`, tx.error);
+        reject(tx.error);
+      };
     });
   },
 };
@@ -1934,15 +1962,15 @@ const Actions = {
 
   // --- not game messages, but still go through Actions for consistency ---
 
-  // Replaces addPeer(pubkey). There's no dialing individual peers anymore —
-  // you join a named room and Trystero connects you to everyone else in it.
-  // Connection state still arrives via the "peers" event, same as before.
+  // Join a room as a 5-second connection probe. If nobody else joins in that
+  // window, auto-disconnect (they're not online). If someone joins, stay
+  // connected for the call. This makes "join" a connection *request* rather
+  // than a persistent room subscription — appropriate for synchronous,
+  // over-call use.
   async joinRoom(roomName) {
     if (Transport.room) Transport.leave();
     Transport.join(roomName);
     await Store.set("lastRoom", roomName);
-    // Reflect the (currently empty) peer set immediately, and announce our
-    // name to anyone already here as they connect (handled in Transport.join).
     reconcilePeers(Object.keys(Transport.room.getPeers()));
     Render.overlay();
   },
@@ -2316,6 +2344,17 @@ const Render = {
   },
 };
 
+// Helper to keep room button UI in sync with Transport.room state
+function updateRoomButtonUI() {
+  if (Transport.room) {
+    El.overlay.joinRoomBtn.textContent = "Leave";
+    El.overlay.roomInput.disabled = true;
+  } else {
+    El.overlay.joinRoomBtn.textContent = "Join";
+    El.overlay.roomInput.disabled = false;
+  }
+}
+
 // ============================================================
 // DELEGATED LISTENERS — attached once, to stable containers,
 // never re-bound when dynamic content is rebuilt.
@@ -2444,15 +2483,12 @@ function wireStaticListeners() {
   El.overlay.joinRoomBtn.addEventListener("click", () => {
     if (Transport.room) {
       Actions.leaveRoom();
-      El.overlay.joinRoomBtn.textContent = "Join";
-      El.overlay.roomInput.disabled = false;
     } else {
       const roomName = El.overlay.roomInput.value.trim();
       if (!roomName) return;
       Actions.joinRoom(roomName);
-      El.overlay.joinRoomBtn.textContent = "Leave";
-      El.overlay.roomInput.disabled = true;
     }
+    updateRoomButtonUI();
   });
   El.overlay.roomInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !Transport.room) El.overlay.joinRoomBtn.click();
@@ -2577,6 +2613,9 @@ async function init() {
 
   try {
     GameState.myUsername = await Store.get("username");
+    if (GameState.myUsername && El.overlay.usernameInput) {
+      El.overlay.usernameInput.value = GameState.myUsername;
+    }
   } catch (e) {
     GameState.myUsername = null;
   }
