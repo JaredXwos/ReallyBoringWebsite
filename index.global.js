@@ -4343,29 +4343,28 @@ var CoralieCore = (() => {
   var LivePeerConnection = class {
     constructor(pc, observer) {
       this.pc = pc;
-      this.observer = observer;
       this.onconnectionstatechange = null;
       this.ondatachannel = null;
-      this.pc.onconnectionstatechange = () => {
-        this.observer?.connectionState?.(this.pc.connectionState);
-        this.onconnectionstatechange?.();
-      };
+      this.pc.onconnectionstatechange = () => this.onconnectionstatechange?.();
       this.pc.ondatachannel = (ev) => {
         this.ondatachannel?.({ channel: new LiveDataChannel(ev.channel) });
       };
       if (observer) {
-        this.pc.oniceconnectionstatechange = () => {
+        this.pc.addEventListener("iceconnectionstatechange", () => {
           observer.iceConnectionState?.(this.pc.iceConnectionState);
-        };
-        this.pc.onicegatheringstatechange = () => {
+        });
+        this.pc.addEventListener("icegatheringstatechange", () => {
           observer.iceGatheringState?.(this.pc.iceGatheringState);
-        };
-        this.pc.onsignalingstatechange = () => {
+        });
+        this.pc.addEventListener("signalingstatechange", () => {
           observer.signalingState?.(this.pc.signalingState);
-        };
-        this.pc.onicecandidate = (ev) => {
+        });
+        this.pc.addEventListener("icecandidate", (ev) => {
           observer.iceCandidate?.(ev.candidate ? ev.candidate.candidate : null);
-        };
+        });
+        this.pc.addEventListener("connectionstatechange", () => {
+          observer.connectionState?.(this.pc.connectionState);
+        });
       }
     }
     get connectionState() {
