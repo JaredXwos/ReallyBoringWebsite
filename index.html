@@ -546,30 +546,59 @@
         log("info", "    [" + i + "] " + srv.urls[0]);
       });
       
-      // Diagnostic observer: surfaces the internal WebRTC lifecycle per peer.
-      // This is where ICE failures (the usual cause of "connects locally but
-      // not across devices") become visible.
+      // Diagnostic observer: surfaces the internal WebRTC lifecycle per peer,
+      // with elapsed-time splits so we can see WHERE the time actually goes:
+      //   T0 → gathering complete   = local ICE gathering (offer/answer build time)
+      //   gathering complete → stable = signalling round trip through the relay
+      //     (signalingState 'stable' fires the moment the initiator applies the
+      //     answer via setRemoteDescription — i.e. "answer received & applied")
+      //   stable → connected        = ICE resolution cost (mDNS lookup / hairpin
+      //     NAT / connectivity checks) — this is the part no JS library can
+      //     shrink; it's below the browser's WebRTC engine.
       const observerFactory = (peerPubkeyHex, role) => {
         const tag = shortKey(peerPubkeyHex) + " [" + role + "]";
+        const t0 = performance.now();
+        const elapsed = () => ((performance.now() - t0) / 1000).toFixed(2) + "s";
         let candidateCount = 0;
+        let tGatheringComplete = null;
+        let tStable = null;
+
         return {
           connectionState: (state) => {
-            log("event", tag + " connectionState → " + state);
+            log("event", tag + " connectionState → " + state + "  (t=" + elapsed() + ")");
+            if (state === "connected") {
+              log("event", "═══ " + tag + " TIMING SUMMARY ═══");
+              log("event", "  total: " + elapsed());
+              if (tGatheringComplete !== null) {
+                log("event", "  local gathering: " + (tGatheringComplete / 1000).toFixed(2) + "s");
+              }
+              if (tStable !== null && tGatheringComplete !== null) {
+                log("event", "  signalling round trip (offer→answer via relay): " +
+                  ((tStable - tGatheringComplete) / 1000).toFixed(2) + "s");
+              }
+              if (tStable !== null) {
+                log("event", "  ICE resolution (answer applied → connected): " +
+                  ((performance.now() - t0 - tStable) / 1000).toFixed(2) + "s");
+              }
+              log("event", "═══════════════════════════" + "═".repeat(tag.length));
+            }
           },
           iceConnectionState: (state) => {
             const level = (state === "failed" || state === "disconnected") ? "error" : "event";
-            log(level, tag + " iceConnectionState → " + state);
+            log(level, tag + " iceConnectionState → " + state + "  (t=" + elapsed() + ")");
             if (state === "failed") {
-              log("error", tag + " ICE FAILED — no usable candidate pair.");
+              log("error", tag + " ICE FAILED — no usable candidate pair.  (t=" + elapsed() + ")");
               log("error", "  → Devices likely can't reach each other over UDP.");
               log("error", "  → Common: AP/client isolation, guest Wi-Fi, or cellular.");
               log("error", "  → STUN-only (no TURN) means there's no relay fallback.");
             }
           },
           iceGatheringState: (state) => {
-            log("info", tag + " iceGatheringState → " + state);
+            log("info", tag + " iceGatheringState → " + state + "  (t=" + elapsed() + ")");
             if (state === "complete") {
-              log("info", tag + " gathered " + candidateCount + " candidate(s)");
+              tGatheringComplete = performance.now() - t0;
+              log("info", tag + " gathered " + candidateCount + " candidate(s) in " +
+                (tGatheringComplete / 1000).toFixed(2) + "s");
               if (candidateCount === 0) {
                 log("error", tag + " ZERO candidates — STUN unreachable or UDP blocked.");
               }
@@ -585,10 +614,19 @@
             else if (candidate.includes(" typ relay")) kind = "relay (TURN)";
             else if (candidate.includes(" typ prflx")) kind = "prflx";
             const mdns = /[0-9a-f-]{36}\.local/i.test(candidate) ? " [mDNS-hidden]" : "";
-            log("info", tag + "  cand #" + candidateCount + ": " + kind + mdns);
+            log("info", tag + "  cand #" + candidateCount + ": " + kind + mdns + "  (t=" + elapsed() + ")");
           },
           signalingState: (state) => {
-            log("info", tag + " signalingState → " + state);
+            log("info", tag + " signalingState → " + state + "  (t=" + elapsed() + ")");
+            // For the initiator, 'stable' fires right after setRemoteDescription(answer) —
+            // i.e. this is the moment the answer arrived back via relay and was applied.
+            if (state === "stable" && tStable === null) {
+              tStable = performance.now() - t0;
+              if (role === "initiator" && tGatheringComplete !== null) {
+                log("event", tag + " ANSWER RECEIVED — relay round trip: " +
+                  ((tStable - tGatheringComplete) / 1000).toFixed(2) + "s");
+              }
+            }
           },
         };
       };
@@ -597,8 +635,17 @@
         relayUrls: relayUrls,
         iceServers: iceServers,
         observerFactory: observerFactory,
+        // Bumped from the 30s default: that window was tight enough that every
+        // retry tore down and rebuilt the RTCPeerConnection before a slow-but-
+        // working mDNS/hairpin resolution could finish. 90s gives a single
+        // attempt room to actually complete so we can measure what it needs,
+        // instead of resetting progress every 30s for 5 attempts.
+        handshakeTimeoutMs: 90000,
       });
+      log("info", "handshakeTimeoutMs set to 90s (was 30s default) — a single");
+      log("info", "attempt now gets time to finish instead of being reset.");
       
+
       myPubkeyHex = manager.myPubkeyHex;
       el.myPubkey.textContent = myPubkeyHex;
       log("info", "Manager initialized - pubkey: " + shortKey(myPubkeyHex));
