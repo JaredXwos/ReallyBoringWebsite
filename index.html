@@ -508,23 +508,47 @@
       el.myPubkey.textContent = myPubkeyHex;
       log("info", "Manager initialized - pubkey: " + shortKey(myPubkeyHex));
       log("info", "Full pubkey: " + myPubkeyHex);
+      
+      // Log manager state for debugging
+      log("info", "Manager object: " + (manager ? "exists" : "null"));
+      log("info", "Manager properties: peers=" + (manager.peers ? "Set" : "missing") + ", incomingMessages=" + (manager.incomingMessages ? "Flow" : "missing") + ", terminalFailures=" + (manager.terminalFailures ? "Flow" : "missing"));
 
-      // Subscribe to peers updates
-      manager.peers.subscribe((peerSet) => {
-        log("info", "Peers update event triggered");
+      // Wrap peer updates with detailed logging
+      let peerUpdateCount = 0;
+      const peersSubscription = manager.peers.subscribe((peerSet) => {
+        peerUpdateCount++;
+        log("info", `[peers.${peerUpdateCount}] Event received`);
+        log("info", `  Type: ${typeof peerSet}`);
+        log("info", `  Is Set: ${peerSet instanceof Set}`);
+        log("info", `  Is Array: ${Array.isArray(peerSet)}`);
+        if (peerSet) {
+          const arr = Array.from(peerSet || []);
+          log("info", `  Length: ${arr.length}`);
+          arr.forEach((p, i) => {
+            log("info", `    [${i}] ${typeof p === 'object' ? 'object' : typeof p} - pubkeyHex=${p?.pubkeyHex ? shortKey(p.pubkeyHex) : 'missing'}`);
+          });
+        }
         handlePeersEvent(peerSet);
       });
 
-      // Subscribe to incoming messages
-      manager.incomingMessages.subscribe((message) => {
-        log("info", "Message event from " + shortKey(message.from));
+      // Wrap incoming messages with detailed logging
+      let messageCount = 0;
+      const messagesSubscription = manager.incomingMessages.subscribe((message) => {
+        messageCount++;
+        log("info", `[message.${messageCount}] Received`);
+        log("info", `  From: ${message.from ? shortKey(message.from) : 'missing'}`);
+        log("info", `  Payload length: ${message.payload ? message.payload.length : 'missing'}`);
         handleMessageEvent(message);
       });
 
-      // Subscribe to terminal failures
-      manager.terminalFailures.subscribe((failure) => {
-        log("error", "Terminal failure for " + shortKey(failure.pubkeyHex) + " after " + failure.attemptCount + " attempts");
-        log("error", "  Reason: Offer/answer negotiation failed (NAT/firewall or peer not listening?)");
+      // Wrap terminal failures with detailed logging
+      let failureCount = 0;
+      const failuresSubscription = manager.terminalFailures.subscribe((failure) => {
+        failureCount++;
+        log("error", `[failure.${failureCount}] Terminal failure`);
+        log("error", `  Pubkey: ${failure.pubkeyHex ? shortKey(failure.pubkeyHex) : 'missing'}`);
+        log("error", `  Attempts: ${failure.attemptCount || 'missing'}`);
+        log("error", `  Reason: Offer/answer negotiation failed (NAT/firewall or peer not listening?)`);
         handleTerminalFailureEvent(failure);
       });
       
@@ -532,6 +556,7 @@
     } catch (e) {
       el.myPubkey.textContent = "unavailable";
       log("error", "Couldn't initialize manager: " + e.message);
+      log("error", "Stack: " + e.stack);
     }
   }
 
