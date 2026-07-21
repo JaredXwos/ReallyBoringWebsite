@@ -546,9 +546,57 @@
         log("info", "    [" + i + "] " + srv.urls[0]);
       });
       
+      // Diagnostic observer: surfaces the internal WebRTC lifecycle per peer.
+      // This is where ICE failures (the usual cause of "connects locally but
+      // not across devices") become visible.
+      const observerFactory = (peerPubkeyHex, role) => {
+        const tag = shortKey(peerPubkeyHex) + " [" + role + "]";
+        let candidateCount = 0;
+        return {
+          connectionState: (state) => {
+            log("event", tag + " connectionState → " + state);
+          },
+          iceConnectionState: (state) => {
+            const level = (state === "failed" || state === "disconnected") ? "error" : "event";
+            log(level, tag + " iceConnectionState → " + state);
+            if (state === "failed") {
+              log("error", tag + " ICE FAILED — no usable candidate pair.");
+              log("error", "  → Devices likely can't reach each other over UDP.");
+              log("error", "  → Common: AP/client isolation, guest Wi-Fi, or cellular.");
+              log("error", "  → STUN-only (no TURN) means there's no relay fallback.");
+            }
+          },
+          iceGatheringState: (state) => {
+            log("info", tag + " iceGatheringState → " + state);
+            if (state === "complete") {
+              log("info", tag + " gathered " + candidateCount + " candidate(s)");
+              if (candidateCount === 0) {
+                log("error", tag + " ZERO candidates — STUN unreachable or UDP blocked.");
+              }
+            }
+          },
+          iceCandidate: (candidate) => {
+            if (candidate === null) return; // end-of-candidates sentinel
+            candidateCount++;
+            // Classify the candidate type for a quick read on what paths exist.
+            let kind = "?";
+            if (candidate.includes(" typ host")) kind = "host (LAN)";
+            else if (candidate.includes(" typ srflx")) kind = "srflx (STUN/public)";
+            else if (candidate.includes(" typ relay")) kind = "relay (TURN)";
+            else if (candidate.includes(" typ prflx")) kind = "prflx";
+            const mdns = /[0-9a-f-]{36}\.local/i.test(candidate) ? " [mDNS-hidden]" : "";
+            log("info", tag + "  cand #" + candidateCount + ": " + kind + mdns);
+          },
+          signalingState: (state) => {
+            log("info", tag + " signalingState → " + state);
+          },
+        };
+      };
+
       manager = window.CoralieCore.createLiveConnectionManager({
         relayUrls: relayUrls,
         iceServers: iceServers,
+        observerFactory: observerFactory,
       });
       
       myPubkeyHex = manager.myPubkeyHex;

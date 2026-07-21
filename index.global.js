@@ -240,7 +240,7 @@ var CoralieCore = (() => {
   var HANDSHAKE_TIMEOUT_MS = 3e4;
   var MAX_INITIATION_ATTEMPTS = 5;
   var LiveConnectionManager = class {
-    constructor(signalingClient, peerConnectionFactory, handshakeTimeoutMs) {
+    constructor(signalingClient, peerConnectionFactory, handshakeTimeoutMs, observerFactory) {
       this.initiating = /* @__PURE__ */ new Map();
       this.connected = /* @__PURE__ */ new Map();
       this.timeoutCheckInterval = null;
@@ -249,6 +249,7 @@ var CoralieCore = (() => {
       this.signalingClient = signalingClient;
       this.peerConnectionFactory = peerConnectionFactory;
       this.handshakeTimeoutMs = handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
+      this.observerFactory = observerFactory;
       this.peers = createStateFlow(/* @__PURE__ */ new Set());
       this.incomingMessages = createSharedFlow();
       this.terminalFailures = createSharedFlow();
@@ -292,7 +293,8 @@ var CoralieCore = (() => {
     startInitiation(pubkeyHex) {
       const connection = new LiveInitiator({
         peerConnectionFactory: this.peerConnectionFactory,
-        handshakeTimeoutMs: this.handshakeTimeoutMs
+        handshakeTimeoutMs: this.handshakeTimeoutMs,
+        observer: this.observerFactory?.(pubkeyHex, "initiator")
       });
       const slot = {
         connection,
@@ -344,7 +346,10 @@ var CoralieCore = (() => {
       if (this.closed) return;
       if (this.connected.has(fromPubkeyHex)) return;
       if (this.initiating.size > 0) return;
-      const answerer = new LiveAnswerer({ peerConnectionFactory: this.peerConnectionFactory });
+      const answerer = new LiveAnswerer({
+        peerConnectionFactory: this.peerConnectionFactory,
+        observer: this.observerFactory?.(fromPubkeyHex, "answerer")
+      });
       answerer.state.subscribe((state) => {
         if (this.closed) return;
         if (this.initiating.has(fromPubkeyHex)) return;
@@ -415,7 +420,8 @@ var CoralieCore = (() => {
       slot.startedAt = Date.now();
       const newConnection = new LiveInitiator({
         peerConnectionFactory: this.peerConnectionFactory,
-        handshakeTimeoutMs: this.handshakeTimeoutMs
+        handshakeTimeoutMs: this.handshakeTimeoutMs,
+        observer: this.observerFactory?.(pubkeyHex, "initiator")
       });
       slot.connection = newConnection;
       newConnection.state.subscribe((state) => {
@@ -3083,6 +3089,17 @@ var CoralieCore = (() => {
   })();
 
   // node_modules/nostr-tools/lib/esm/pure.js
+  var utf8Decoder = new TextDecoder("utf-8");
+  var utf8Encoder = new TextEncoder();
+  function isHex32(input) {
+    for (let i2 = 0; i2 < 64; i2++) {
+      let cc = input.charCodeAt(i2);
+      if (isNaN(cc) || cc < 48 || cc > 102 || cc > 57 && cc < 97) {
+        return false;
+      }
+    }
+    return true;
+  }
   var verifiedSymbol = /* @__PURE__ */ Symbol("verified");
   var isRecord = (obj) => obj instanceof Object;
   function validateEvent(event) {
@@ -3096,7 +3113,7 @@ var CoralieCore = (() => {
       return false;
     if (typeof event.pubkey !== "string")
       return false;
-    if (!event.pubkey.match(/^[a-f0-9]{64}$/))
+    if (!isHex32(event.pubkey))
       return false;
     if (!Array.isArray(event.tags))
       return false;
@@ -3111,8 +3128,6 @@ var CoralieCore = (() => {
     }
     return true;
   }
-  var utf8Decoder = new TextDecoder("utf-8");
-  var utf8Encoder = new TextEncoder();
   var JS = class {
     generateSecretKey() {
       return schnorr.utils.randomSecretKey();
@@ -4326,14 +4341,32 @@ var CoralieCore = (() => {
     }
   };
   var LivePeerConnection = class {
-    constructor(pc) {
+    constructor(pc, observer) {
       this.pc = pc;
+      this.observer = observer;
       this.onconnectionstatechange = null;
       this.ondatachannel = null;
-      this.pc.onconnectionstatechange = () => this.onconnectionstatechange?.();
+      this.pc.onconnectionstatechange = () => {
+        this.observer?.connectionState?.(this.pc.connectionState);
+        this.onconnectionstatechange?.();
+      };
       this.pc.ondatachannel = (ev) => {
         this.ondatachannel?.({ channel: new LiveDataChannel(ev.channel) });
       };
+      if (observer) {
+        this.pc.oniceconnectionstatechange = () => {
+          observer.iceConnectionState?.(this.pc.iceConnectionState);
+        };
+        this.pc.onicegatheringstatechange = () => {
+          observer.iceGatheringState?.(this.pc.iceGatheringState);
+        };
+        this.pc.onsignalingstatechange = () => {
+          observer.signalingState?.(this.pc.signalingState);
+        };
+        this.pc.onicecandidate = (ev) => {
+          observer.iceCandidate?.(ev.candidate ? ev.candidate.candidate : null);
+        };
+      }
     }
     get connectionState() {
       return this.pc.connectionState;
@@ -4398,7 +4431,12 @@ var CoralieCore = (() => {
     const signer = LiveSigner.generate();
     const signalingClient = new LiveNostrSignallingClient(signer, relayUrls);
     const peerConnectionFactory = () => new LivePeerConnection(new RTCPeerConnection({ iceServers }));
-    const manager = new LiveConnectionManager(signalingClient, peerConnectionFactory);
+    const manager = new LiveConnectionManager(
+      signalingClient,
+      peerConnectionFactory,
+      options.handshakeTimeoutMs,
+      options.observerFactory
+    );
     return manager;
   }
   return __toCommonJS(index_exports);
