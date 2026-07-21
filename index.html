@@ -491,17 +491,33 @@
 
   function initManager() {
     try {
-      // Initialize manager with real Nostr relays (same as integration tests)
+      // Initialize manager with real Nostr relays + STUN servers
       const relayUrls = [
         'wss://relay.damus.io',
         'wss://nos.lol',
         'wss://nostr.oxtr.dev',
       ]
       
-      log("info", "Initializing manager with relays: " + relayUrls.join(", "));
+      // STUN servers for ICE candidate gathering (needed for LAN peers)
+      const iceServers = [
+        { urls: ['stun:stun.l.google.com:19302'] },
+        { urls: ['stun:stun1.l.google.com:19302'] },
+        { urls: ['stun:stun2.l.google.com:19302'] },
+        { urls: ['stun:stun3.l.google.com:19302'] },
+        { urls: ['stun:stun4.l.google.com:19302'] },
+        { urls: ['stun:stun.cloudflare.com:3478'] },
+      ]
+      
+      log("info", "Initializing manager with:");
+      log("info", "  Relays: " + relayUrls.join(", "));
+      log("info", "  STUN servers: " + iceServers.length + " server(s)");
+      iceServers.forEach((srv, i) => {
+        log("info", "    [" + i + "] " + srv.urls[0]);
+      });
       
       manager = window.CoralieCore.createLiveConnectionManager({
         relayUrls: relayUrls,
+        iceServers: iceServers,
       });
       
       myPubkeyHex = manager.myPubkeyHex;
