@@ -464,7 +464,38 @@
   function handleTerminalFailureEvent(failure) {
     const pubkeyHex = failure.pubkeyHex;
     const attempts = failure.attemptCount;
-    log("error", "Connection to " + shortKey(pubkeyHex) + " failed permanently after " + attempts + " attempt(s)");
+    log("error", "");
+    log("error", "╔════════════════════════════════════════╗");
+    log("error", "║    CONNECTION FAILED - DIAGNOSTICS     ║");
+    log("error", "╚════════════════════════════════════════╝");
+    log("error", "Peer: " + shortKey(pubkeyHex));
+    log("error", "Attempts: " + attempts);
+    log("error", "");
+    log("error", "Possible causes:");
+    log("error", "  1. OFFER NOT RECEIVED by peer");
+    log("error", "     → Peer isn't subscribed to relay");
+    log("error", "     → Peer not running (tab closed)");
+    log("error", "     → Relay not routing (relay down)");
+    log("error", "");
+    log("error", "  2. ANSWER NOT RECEIVED by us");
+    log("error", "     → Peer rejected offer");
+    log("error", "     → Peer's relay session closed");
+    log("error", "     → Network issue during answer send");
+    log("error", "");
+    log("error", "  3. WEBRTC ICE FAILURE");
+    log("error", "     → No ICE candidates found (firewall blocks UDP)");
+    log("error", "     → STUN servers unreachable");
+    log("error", "     → Symmetric NAT blocking both sides");
+    log("error", "");
+    log("error", "Debugging steps:");
+    log("error", "  • Verify BOTH tabs show 'Manager subscriptions active'");
+    log("error", "  • Check browser console for WebRTC errors");
+    log("error", "  • Verify peer's [peers.X] events show this peer");
+    log("error", "  • Check relay status: https://status.nostr.watch/");
+    log("error", "  • Try pinging peer's IP if on LAN");
+    log("error", "");
+    log("error", "Final status: " + shortKey(pubkeyHex) + " - FAILED");
+    log("error", "");
   }
 
   // ---- identity ----
@@ -625,10 +656,28 @@
     try {
       log("info", "═══ Adding peer ═══");
       log("info", "Target pubkey: " + shortKey(pubkeyHex));
-      log("info", "This will attempt WebRTC negotiation via relay");
+      log("info", "My pubkey:     " + shortKey(myPubkeyHex));
+      log("info", "");
+      log("info", "Signalling flow:");
+      log("info", "  1. This manager will create an SDP offer");
+      log("info", "  2. Offer will be encrypted (NIP-44) with conversation key");
+      log("info", "  3. Offer sent to relay(s) via Nostr event");
+      log("info", "  4. Peer receives offer from relay");
+      log("info", "  5. Peer creates answer and sends back");
+      log("info", "  6. This manager receives answer");
+      log("info", "  7. WebRTC ICE candidates exchanged");
+      log("info", "  8. Peers connect");
+      log("info", "");
+      log("info", "WebRTC flow:");
+      log("info", "  - STUN servers will help discover network addresses");
+      log("info", "  - ICE candidates exchanged via relay");
+      log("info", "  - Connection attempt begins");
+      log("info", "");
+      log("info", "⏳ Waiting for peer response (up to 5 retries)...");
+      log("info", "");
+      
       manager.addPeer(pubkeyHex);
-      log("info", "✓ Peer addition requested");
-      log("info", "Waiting for offer/answer exchange...");
+      log("info", "✓ Peer addition requested - watch for events below");
       el.peerInput.value = "";
     } catch (e) {
       log("error", "Couldn't add peer: " + e.message);
