@@ -393,12 +393,24 @@
 
   // ---- mesh event handling ----
   function handlePeersEvent(peerSet) {
+    // peerSet is a Set of peer objects, not an array
     const incoming = new Set();
-    for (const peer of peerSet) {
-      incoming.add(peer.pubkeyHex);
+    
+    if (!peerSet || typeof peerSet !== 'object') {
+      log("error", "Invalid peerSet: " + typeof peerSet);
+      return;
     }
-
-    log("info", "Processing peers event: " + Array.from(incoming).map(shortKey).join(", "));
+    
+    // Convert Set to array and extract pubkeyHex
+    const peerArray = Array.isArray(peerSet) ? peerSet : Array.from(peerSet || []);
+    log("info", "Peers event received: " + peerArray.length + " peer(s)");
+    
+    for (const peer of peerArray) {
+      if (peer && peer.pubkeyHex) {
+        incoming.add(peer.pubkeyHex);
+        log("info", "  - Peer: " + shortKey(peer.pubkeyHex));
+      }
+    }
 
     // New peers
     for (const pk of incoming) {
@@ -495,26 +507,28 @@
       myPubkeyHex = manager.myPubkeyHex;
       el.myPubkey.textContent = myPubkeyHex;
       log("info", "Manager initialized - pubkey: " + shortKey(myPubkeyHex));
+      log("info", "Full pubkey: " + myPubkeyHex);
 
       // Subscribe to peers updates
       manager.peers.subscribe((peerSet) => {
-        log("info", "Peers update: " + peerSet.length + " peer(s)");
+        log("info", "Peers update event triggered");
         handlePeersEvent(peerSet);
       });
 
       // Subscribe to incoming messages
       manager.incomingMessages.subscribe((message) => {
-        log("info", "Message from " + shortKey(message.from) + " (payload: " + message.payload.length + " bytes)");
+        log("info", "Message event from " + shortKey(message.from));
         handleMessageEvent(message);
       });
 
       // Subscribe to terminal failures
       manager.terminalFailures.subscribe((failure) => {
-        log("error", "Terminal failure: " + shortKey(failure.pubkeyHex) + " after " + failure.attemptCount + " attempts");
+        log("error", "Terminal failure for " + shortKey(failure.pubkeyHex) + " after " + failure.attemptCount + " attempts");
+        log("error", "  Reason: Offer/answer negotiation failed (NAT/firewall or peer not listening?)");
         handleTerminalFailureEvent(failure);
       });
       
-      log("info", "Manager subscriptions active");
+      log("info", "Manager subscriptions active - ready for peers");
     } catch (e) {
       el.myPubkey.textContent = "unavailable";
       log("error", "Couldn't initialize manager: " + e.message);
@@ -560,11 +574,20 @@
       log("error", "Peer pubkey cannot be empty");
       return;
     }
+    
+    if (pubkeyHex === myPubkeyHex) {
+      log("error", "Cannot add yourself as a peer");
+      return;
+    }
+    
     el.addPeerBtn.disabled = true;
     try {
-      log("info", "Adding peer: " + shortKey(pubkeyHex));
+      log("info", "═══ Adding peer ═══");
+      log("info", "Target pubkey: " + shortKey(pubkeyHex));
+      log("info", "This will attempt WebRTC negotiation via relay");
       manager.addPeer(pubkeyHex);
       log("info", "✓ Peer addition requested");
+      log("info", "Waiting for offer/answer exchange...");
       el.peerInput.value = "";
     } catch (e) {
       log("error", "Couldn't add peer: " + e.message);
