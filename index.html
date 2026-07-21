@@ -277,7 +277,7 @@
   </section>
 
 <!-- CoralieCore library (dist/index.global.js) -->
-<script src="index.global.js"></script>
+<script src="dist/index.global.js"></script>
 
 <script>
 (function () {
@@ -337,9 +337,17 @@
   }
 
   function announceUsernameTo(pubkeyHex) {
-    if (!myUsername || !manager) return;
+    if (!myUsername || !manager) {
+      if (!myUsername) {
+        log("info", "Skipping username announce: no username set yet");
+      }
+      return;
+    }
     try {
-      manager.sendToPeer(pubkeyHex, encodeUsernameAnnouncement(myUsername));
+      const payload = encodeUsernameAnnouncement(myUsername);
+      log("info", "Announcing username to " + shortKey(pubkeyHex) + ": " + myUsername);
+      manager.sendToPeer(pubkeyHex, payload);
+      log("info", "Username announcement sent to " + shortKey(pubkeyHex));
     } catch (e) {
       log("error", "Couldn't send username to " + shortKey(pubkeyHex) + ": " + e.message);
     }
@@ -390,19 +398,25 @@
       incoming.add(peer.pubkeyHex);
     }
 
+    log("info", "Processing peers event: " + Array.from(incoming).map(shortKey).join(", "));
+
+    // New peers
     for (const pk of incoming) {
       if (!peers.has(pk)) {
         peers.set(pk, null);
-        log("event", "Peer connected: " + shortKey(pk));
+        log("event", "✓ NEW PEER: " + shortKey(pk));
         announceUsernameTo(pk);
       }
     }
+    
+    // Disconnected peers
     for (const pk of Array.from(peers.keys())) {
       if (!incoming.has(pk)) {
         peers.delete(pk);
-        log("event", "Peer disconnected: " + shortKey(pk));
+        log("event", "✗ PEER DISCONNECTED: " + shortKey(pk));
       }
     }
+    
     renderPeers();
   }
 
@@ -410,27 +424,29 @@
     const fromPubkeyHex = message.from;
     const payload = message.payload;
     if (!fromPubkeyHex || typeof payload !== "string") {
-      log("error", "Malformed message event");
+      log("error", "Malformed message event: missing from or payload");
       return;
     }
+
+    log("info", "Processing message from " + shortKey(fromPubkeyHex) + " (size: " + payload.length + ")");
 
     let decoded;
     try {
       decoded = JSON.parse(b64DecodeUtf8(payload));
     } catch (e) {
-      log("error", "Unreadable message from " + shortKey(fromPubkeyHex));
+      log("error", "Couldn't decode message from " + shortKey(fromPubkeyHex) + ": " + e.message);
       return;
     }
 
     if (decoded && decoded.type === "username" && typeof decoded.name === "string") {
       const wasKnown = peers.has(fromPubkeyHex);
       peers.set(fromPubkeyHex, decoded.name);
-      log("event", shortKey(fromPubkeyHex) + " is now known as \u201c" + decoded.name + "\u201d");
+      log("event", shortKey(fromPubkeyHex) + " \u2192 " + decoded.name);
       if (wasKnown) renderPeers();
       return;
     }
 
-    log("info", "Message from " + shortKey(fromPubkeyHex) + " (unrecognized format)");
+    log("info", "Message from " + shortKey(fromPubkeyHex) + " (type: " + (decoded ? decoded.type : "unknown") + ")");
   }
 
   function handleTerminalFailureEvent(failure) {
@@ -463,25 +479,42 @@
 
   function initManager() {
     try {
-      manager = window.CoralieCore.createLiveConnectionManager();
+      // Initialize manager with real Nostr relays (same as integration tests)
+      const relayUrls = [
+        'wss://relay.damus.io',
+        'wss://nos.lol',
+        'wss://nostr.oxtr.dev',
+      ]
+      
+      log("info", "Initializing manager with relays: " + relayUrls.join(", "));
+      
+      manager = window.CoralieCore.createLiveConnectionManager({
+        relayUrls: relayUrls,
+      });
+      
       myPubkeyHex = manager.myPubkeyHex;
       el.myPubkey.textContent = myPubkeyHex;
-      log("info", "Manager initialized with public key");
+      log("info", "Manager initialized - pubkey: " + shortKey(myPubkeyHex));
 
       // Subscribe to peers updates
       manager.peers.subscribe((peerSet) => {
+        log("info", "Peers update: " + peerSet.length + " peer(s)");
         handlePeersEvent(peerSet);
       });
 
       // Subscribe to incoming messages
       manager.incomingMessages.subscribe((message) => {
+        log("info", "Message from " + shortKey(message.from) + " (payload: " + message.payload.length + " bytes)");
         handleMessageEvent(message);
       });
 
       // Subscribe to terminal failures
       manager.terminalFailures.subscribe((failure) => {
+        log("error", "Terminal failure: " + shortKey(failure.pubkeyHex) + " after " + failure.attemptCount + " attempts");
         handleTerminalFailureEvent(failure);
       });
+      
+      log("info", "Manager subscriptions active");
     } catch (e) {
       el.myPubkey.textContent = "unavailable";
       log("error", "Couldn't initialize manager: " + e.message);
@@ -523,11 +556,15 @@
       return;
     }
     const pubkeyHex = el.peerInput.value.trim();
-    if (!pubkeyHex) return;
+    if (!pubkeyHex) {
+      log("error", "Peer pubkey cannot be empty");
+      return;
+    }
     el.addPeerBtn.disabled = true;
     try {
+      log("info", "Adding peer: " + shortKey(pubkeyHex));
       manager.addPeer(pubkeyHex);
-      log("info", "Requested add peer " + shortKey(pubkeyHex));
+      log("info", "✓ Peer addition requested");
       el.peerInput.value = "";
     } catch (e) {
       log("error", "Couldn't add peer: " + e.message);
@@ -549,9 +586,12 @@
 
   // ---- init ----
   (function init() {
-    log("info", "Room opened");
+    log("info", "═══════════════════════════════════");
+    log("info", "Coralie Room initialized");
+    log("info", "═══════════════════════════════════");
     initManager();
     loadUsername();
+    log("info", "Startup complete - waiting for peers...");
   })();
 })();
 </script>
