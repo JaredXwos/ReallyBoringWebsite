@@ -260,18 +260,24 @@ var CoralieCore = (() => {
       this.signalingClient.inbound.subscribe((message) => {
         if (this.closed) return;
         try {
-          const frame = JSON.parse(message.payload);
-          if (frame.type === "Offer") {
-            this.onInboundOffer(message.fromPubkeyHex, frame.sessionDescription, frame.attemptCount);
-          } else if (frame.type === "Answer") {
-            this.onInboundAnswer(message.fromPubkeyHex, frame.sessionDescription);
-          } else if (frame.type === "Announce") {
-            this.onInboundAnnounce(message.fromPubkeyHex, frame.pubkeyHex);
+          const description = JSON.parse(message.payload);
+          if (!this.isSessionDescription(description)) {
+            throw new Error("Unsupported signalling message");
+          }
+          if (description.type === "offer") {
+            this.onInboundOffer(message.fromPubkeyHex, description);
+          } else {
+            this.onInboundAnswer(message.fromPubkeyHex, description);
           }
         } catch (err2) {
-          console.error(`Failed to parse signalling frame from ${message.fromPubkeyHex}:`, err2);
+          console.error(`Failed to parse signalling message from ${message.fromPubkeyHex}:`, err2);
         }
       });
+    }
+    isSessionDescription(value) {
+      if (typeof value !== "object" || value === null) return false;
+      const description = value;
+      return (description.type === "offer" || description.type === "answer") && typeof description.sdp === "string";
     }
     startTimeoutChecker() {
       this.timeoutCheckInterval = setInterval(() => {
@@ -318,12 +324,7 @@ var CoralieCore = (() => {
         const offer = await initiator.createOffer();
         if (this.closed) return;
         if (this.initiating.get(pubkeyHex)?.connection !== initiator) return;
-        const frame = {
-          type: "Offer",
-          sessionDescription: offer,
-          attemptCount: this.initiating.get(pubkeyHex).attemptCount
-        };
-        const result = this.signalingClient.send(pubkeyHex, JSON.stringify(frame));
+        const result = this.signalingClient.send(pubkeyHex, JSON.stringify(offer));
         if (this.closed) return;
         if (this.initiating.get(pubkeyHex)?.connection !== initiator) return;
         if (!result.ok) {
@@ -342,7 +343,7 @@ var CoralieCore = (() => {
      * - sender is not already `connected`
      * - `initiating` map is empty (global gate)
      */
-    onInboundOffer(fromPubkeyHex, offer, attemptCount) {
+    onInboundOffer(fromPubkeyHex, offer) {
       if (this.closed) return;
       if (this.connected.has(fromPubkeyHex)) return;
       if (this.initiating.size > 0) return;
@@ -364,11 +365,7 @@ var CoralieCore = (() => {
       try {
         const answer = await answerer.createAnswer(offer);
         if (this.closed) return;
-        const frame = {
-          type: "Answer",
-          sessionDescription: answer
-        };
-        this.signalingClient.send(toPubkeyHex, JSON.stringify(frame));
+        this.signalingClient.send(toPubkeyHex, JSON.stringify(answer));
       } catch (err2) {
         if (this.closed) return;
         console.error(`Failed to create/send answer to ${toPubkeyHex}:`, err2);
@@ -437,7 +434,7 @@ var CoralieCore = (() => {
     }
     /**
      * §2 rule 5: Connection reaches open.
-     * Move from `initiating` to `connected`, broadcast `Announce` to all other
+     * Move from `initiating` to `connected`, broadcast `announce` to all other
      * connected peers (best-effort).
      */
     onLinkConnected(pubkeyHex, peerLink) {
@@ -465,19 +462,35 @@ var CoralieCore = (() => {
       try {
         const text = new TextDecoder().decode(bytes);
         const frame = JSON.parse(text);
-        if (frame.type === "Data") {
+        if (!this.isDataChannelFrame(frame)) {
+          throw new Error("Unsupported data-channel frame");
+        }
+        if (frame.type === "app") {
           this.incomingMessages.emit({
             from: fromPubkeyHex,
             to: this.myPubkeyHex,
             timestamp: Date.now(),
-            payload: frame.payload
+            payload: Uint8Array.from(frame.payload, (value) => value & 255)
           });
-        } else if (frame.type === "Announce") {
+        } else {
           this.onInboundAnnounce(fromPubkeyHex, frame.pubkeyHex);
         }
       } catch (err2) {
         console.error(`Failed to parse data channel frame from ${fromPubkeyHex}:`, err2);
       }
+    }
+    isDataChannelFrame(value) {
+      if (typeof value !== "object" || value === null) return false;
+      const frame = value;
+      if (frame.type === "announce") {
+        return typeof frame.pubkeyHex === "string";
+      }
+      if (frame.type === "app") {
+        return Array.isArray(frame.payload) && frame.payload.every(
+          (byte) => Number.isInteger(byte) && byte >= -128 && byte <= 255
+        );
+      }
+      return false;
     }
     /**
      * §2 rule 6: Connection closes or fails (post-open).
@@ -498,7 +511,7 @@ var CoralieCore = (() => {
       this.peers.value = updatedPeers;
     }
     /**
-     * §2 rule 5: broadcast an Announce for one newly-connected pubkey to every
+     * §2 rule 5: broadcast an announce for one newly-connected pubkey to every
      * *other* connected peer. This is not a roster sync — the recipient learns
      * about exactly one new peer, not the sender's full connected set — and the
      * newly-connected peer itself is excluded (it doesn't need telling about
@@ -506,7 +519,7 @@ var CoralieCore = (() => {
      */
     broadcastAnnounce(newPubkeyHex) {
       const frame = {
-        type: "Announce",
+        type: "announce",
         pubkeyHex: newPubkeyHex
       };
       const bytes = new TextEncoder().encode(JSON.stringify(frame));
@@ -516,7 +529,7 @@ var CoralieCore = (() => {
       }
     }
     /**
-     * Inbound Announce handling: learn a new peer via gossip (§2 rule 5).
+     * Inbound announce handling: learn a new peer via gossip (§2 rule 5).
      * If already `initiating` or `connected`: no-op (idempotent).
      * Otherwise: call `addPeer()` (same entry point, same idempotency).
      */
@@ -552,8 +565,8 @@ var CoralieCore = (() => {
       const peerLink = this.connected.get(toPubkeyHex);
       if (!peerLink) return;
       const frame = {
-        type: "Data",
-        payload
+        type: "app",
+        payload: Array.from(payload, (value) => value > 127 ? value - 256 : value)
       };
       const bytes = new TextEncoder().encode(JSON.stringify(frame));
       peerLink.send(bytes);
@@ -765,7 +778,7 @@ var CoralieCore = (() => {
   }
 
   // src/nostr/signalling-client/signalling-client.interface.ts
-  var SIGNALLING_KIND = 25050;
+  var SIGNALLING_KIND = 28080;
 
   // src/nostr/signalling-client/signalling-client.live.ts
   var LiveNostrSignallingClient = class {
@@ -1782,7 +1795,7 @@ var CoralieCore = (() => {
     const shiftBy = BigInt(W);
     return { windows, windowSize, mask, maxNumber, shiftBy };
   }
-  function calcOffsets(n, window, wOpts) {
+  function calcOffsets(n, window2, wOpts) {
     const { windowSize, mask, maxNumber, shiftBy } = wOpts;
     let wbits = Number(n & mask);
     let nextN = n >> shiftBy;
@@ -1790,11 +1803,11 @@ var CoralieCore = (() => {
       wbits -= maxNumber;
       nextN += _1n3;
     }
-    const offsetStart = window * windowSize;
+    const offsetStart = window2 * windowSize;
     const offset = offsetStart + Math.abs(wbits) - 1;
     const isZero = wbits === 0;
     const isNeg = wbits < 0;
-    const isNegF = window % 2 !== 0;
+    const isNegF = window2 % 2 !== 0;
     const offsetF = offsetStart;
     return { nextN, offset, isZero, isNeg, isNegF, offsetF };
   }
@@ -1847,7 +1860,7 @@ var CoralieCore = (() => {
       const points = [];
       let p = point;
       let base = p;
-      for (let window = 0; window < windows; window++) {
+      for (let window2 = 0; window2 < windows; window2++) {
         base = p;
         points.push(base);
         for (let i2 = 1; i2 < windowSize; i2++) {
@@ -1870,8 +1883,8 @@ var CoralieCore = (() => {
       let p = this.ZERO;
       let f = this.BASE;
       const wo = calcWOpts(W, this.bits);
-      for (let window = 0; window < wo.windows; window++) {
-        const { nextN, offset, isZero, isNeg, isNegF, offsetF } = calcOffsets(n, window, wo);
+      for (let window2 = 0; window2 < wo.windows; window2++) {
+        const { nextN, offset, isZero, isNeg, isNegF, offsetF } = calcOffsets(n, window2, wo);
         n = nextN;
         if (isZero) {
           f = f.add(negateCt(isNegF, precomputes[offsetF]));
@@ -1889,10 +1902,10 @@ var CoralieCore = (() => {
      */
     wNAFUnsafe(W, precomputes, n, acc = this.ZERO) {
       const wo = calcWOpts(W, this.bits);
-      for (let window = 0; window < wo.windows; window++) {
+      for (let window2 = 0; window2 < wo.windows; window2++) {
         if (n === _0n3)
           break;
-        const { nextN, offset, isZero, isNeg } = calcOffsets(n, window, wo);
+        const { nextN, offset, isZero, isNeg } = calcOffsets(n, window2, wo);
         n = nextN;
         if (isZero) {
           continue;
@@ -4437,6 +4450,172 @@ var CoralieCore = (() => {
       options.observerFactory
     );
     return manager;
+  }
+
+  // src/coralie/browser-coralie-host.ts
+  var BrowserCoralieHost = class {
+    constructor(options = {}, managerFactory = createLiveConnectionManager) {
+      this.peersListeners = /* @__PURE__ */ new Set();
+      this.messageListeners = /* @__PURE__ */ new Set();
+      this.failureListeners = /* @__PURE__ */ new Set();
+      this.managerUnsubscribers = [];
+      this.currentPeers = [];
+      this.closed = false;
+      this.options = options;
+      this.managerFactory = managerFactory;
+      this.manager = this.managerFactory(this.options);
+      this.bindManager();
+    }
+    async getPubkey() {
+      this.assertOpen();
+      return this.manager.myPubkeyHex;
+    }
+    async addPeer(pubkeyHex) {
+      this.assertOpen();
+      this.manager.addPeer(pubkeyHex);
+    }
+    async sendMessage(toPubkeyHex, payload) {
+      this.assertOpen();
+      if (!(payload instanceof Uint8Array)) {
+        throw new TypeError("payload must be a Uint8Array");
+      }
+      const connected = this.currentPeers.some((peer) => peer.pubkeyHex === toPubkeyHex);
+      if (!connected) {
+        throw new Error(`Peer is not connected: ${toPubkeyHex}`);
+      }
+      this.manager.sendToPeer(toPubkeyHex, payload);
+    }
+    async getPeers() {
+      this.assertOpen();
+      return this.clonePeers(this.currentPeers);
+    }
+    async reset() {
+      this.assertOpen();
+      const nextManager = this.managerFactory(this.options);
+      this.unbindManager();
+      this.manager.close();
+      this.manager = nextManager;
+      this.bindManager();
+      return this.manager.myPubkeyHex;
+    }
+    async close() {
+      if (this.closed) return;
+      this.closed = true;
+      this.unbindManager();
+      this.manager.close();
+      this.currentPeers = [];
+    }
+    onPeers(listener) {
+      this.assertOpen();
+      this.peersListeners.add(listener);
+      listener(this.clonePeers(this.currentPeers));
+      return () => {
+        this.peersListeners.delete(listener);
+      };
+    }
+    onMessage(listener) {
+      this.assertOpen();
+      this.messageListeners.add(listener);
+      return () => {
+        this.messageListeners.delete(listener);
+      };
+    }
+    onTerminalFailure(listener) {
+      this.assertOpen();
+      this.failureListeners.add(listener);
+      return () => {
+        this.failureListeners.delete(listener);
+      };
+    }
+    bindManager() {
+      this.managerUnsubscribers = [
+        this.manager.peers.subscribe((peers) => {
+          this.currentPeers = this.normalisePeers(peers);
+          this.emitPeers(this.currentPeers);
+        }),
+        this.manager.incomingMessages.subscribe((message) => {
+          this.emitMessage(this.normaliseMessage(message));
+        }),
+        this.manager.terminalFailures.subscribe((failure) => {
+          this.emitFailure(this.normaliseFailure(failure));
+        })
+      ];
+    }
+    unbindManager() {
+      for (const unsubscribe of this.managerUnsubscribers) {
+        unsubscribe();
+      }
+      this.managerUnsubscribers = [];
+    }
+    normalisePeers(peers) {
+      return [...peers].map((peer) => ({
+        pubkeyHex: peer.pubkeyHex,
+        connectedAt: peer.connectedAt
+      }));
+    }
+    normaliseMessage(message) {
+      return {
+        fromPubkeyHex: message.from,
+        toPubkeyHex: message.to,
+        timestamp: message.timestamp,
+        payload: new Uint8Array(message.payload)
+      };
+    }
+    normaliseFailure(failure) {
+      return {
+        pubkeyHex: failure.pubkeyHex,
+        attemptCount: failure.attemptCount,
+        reason: failure.reason
+      };
+    }
+    emitPeers(peers) {
+      for (const listener of this.peersListeners) {
+        listener(this.clonePeers(peers));
+      }
+    }
+    emitMessage(message) {
+      for (const listener of this.messageListeners) {
+        listener({
+          ...message,
+          payload: new Uint8Array(message.payload)
+        });
+      }
+    }
+    emitFailure(failure) {
+      for (const listener of this.failureListeners) {
+        listener({ ...failure });
+      }
+    }
+    clonePeers(peers) {
+      return peers.map((peer) => ({ ...peer }));
+    }
+    assertOpen() {
+      if (this.closed) {
+        throw new Error("Coralie host is closed");
+      }
+    }
+  };
+
+  // src/coralie/install-coralie.ts
+  function installBrowserCoralie(options = {}) {
+    if (typeof window === "undefined") return void 0;
+    const target = window;
+    if (target.Coralie) {
+      return target.Coralie;
+    }
+    const host = new BrowserCoralieHost(options);
+    Object.defineProperty(target, "Coralie", {
+      value: host,
+      writable: false,
+      configurable: false,
+      enumerable: true
+    });
+    return host;
+  }
+
+  // src/index.ts
+  if (typeof window !== "undefined") {
+    installBrowserCoralie();
   }
   return __toCommonJS(index_exports);
 })();
