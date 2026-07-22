@@ -41,6 +41,36 @@
 
   body { position: relative; }
 
+  /* Startup diagnostics are visible before any application screen is rendered.
+     This prevents initialization failures from appearing as a blank page. */
+  #boot-diagnostics {
+    position: fixed; inset: 0; z-index: 10000;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px; background: var(--bg); color: var(--text);
+  }
+  #boot-diagnostics.hidden { display: none; }
+  #boot-diagnostics.error { background: #180f12; }
+  .boot-card {
+    width: min(680px, 100%); max-height: 90dvh; overflow: auto;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px;
+  }
+  #boot-diagnostics.error .boot-card { border-color: var(--warn); }
+  .boot-title { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
+  .boot-stage { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
+  #boot-diagnostics.error .boot-stage { color: var(--warn); }
+  .boot-detail {
+    display: none; margin: 14px 0 0; padding: 10px;
+    white-space: pre-wrap; word-break: break-word;
+    font-family: var(--font-mono); font-size: 11px; line-height: 1.5;
+    color: var(--text-muted); background: var(--input-bg);
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+  #boot-diagnostics.error .boot-detail { display: block; }
+  .boot-actions { display: none; gap: 8px; margin-top: 14px; }
+  #boot-diagnostics.error .boot-actions { display: flex; }
+  .boot-actions button { flex: 0 0 auto; }
+
   /* Each screen was its own <body>{display:flex;flex-direction:column;
      height:100dvh} before the merge. Now that there are three siblings
      in one body, that layout moves onto the wrapper Render.draw() already
@@ -421,6 +451,99 @@
 </head>
 <body>
 
+  <div id="boot-diagnostics" role="status" aria-live="polite">
+    <div class="boot-card">
+      <div class="boot-title">Starting Round the World</div>
+      <div class="boot-stage" id="boot-stage">Preparing page…</div>
+      <pre class="boot-detail" id="boot-detail"></pre>
+      <div class="boot-actions">
+        <button id="boot-copy-btn">Copy details</button>
+        <button class="primary" id="boot-reload-btn">Reload</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    "use strict";
+
+    var overlay = document.getElementById("boot-diagnostics");
+    var stageElement = document.getElementById("boot-stage");
+    var detailElement = document.getElementById("boot-detail");
+    var history = [];
+
+    function describe(value) {
+      if (value instanceof Error) {
+        return value.stack || (value.name + ": " + value.message);
+      }
+      if (value && typeof value === "object") {
+        try { return JSON.stringify(value, null, 2); } catch (_) {}
+      }
+      return String(value == null ? "Unknown error" : value);
+    }
+
+    function addHistory(message) {
+      var time = new Date().toLocaleTimeString([], { hour12: false });
+      history.push("[" + time + "] " + message);
+      if (history.length > 50) history.shift();
+    }
+
+    function stage(message) {
+      addHistory(message);
+      if (!overlay || overlay.classList.contains("error")) return;
+      stageElement.textContent = message;
+    }
+
+    function fail(error, context) {
+      var heading = context || "Initialization failed";
+      var details = describe(error);
+      addHistory(heading + ": " + details);
+      if (!overlay) return;
+      overlay.classList.remove("hidden");
+      overlay.classList.add("error");
+      stageElement.textContent = heading;
+      detailElement.textContent = history.join("\n") + "\n\n" + details;
+    }
+
+    function ready() {
+      addHistory("Application ready");
+      if (overlay) overlay.classList.add("hidden");
+    }
+
+    window.__CoralieBoot = Object.freeze({ stage: stage, error: fail, ready: ready });
+
+    window.addEventListener("error", function (event) {
+      fail(event.error || event.message, "JavaScript error");
+    });
+
+    window.addEventListener("unhandledrejection", function (event) {
+      fail(event.reason, "Unhandled promise rejection");
+    });
+
+    document.getElementById("boot-reload-btn").addEventListener("click", function () {
+      location.reload();
+    });
+
+    document.getElementById("boot-copy-btn").addEventListener("click", async function () {
+      var details = detailElement.textContent;
+      try {
+        await navigator.clipboard.writeText(details);
+        this.textContent = "Copied";
+      } catch (_) {
+        var area = document.createElement("textarea");
+        area.value = details;
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+        this.textContent = "Copied";
+      }
+    });
+
+    stage("Loading Coralie library…");
+  })();
+  </script>
+
   <!-- ============ MENU ============ -->
   <div class="screen" data-screen="menu">
     <div id="home-topbar">
@@ -683,7 +806,11 @@
     </div>
   </div>
 
-<script src="./index.global.js"></script>
+<script
+  src="./index.global.js"
+  onload="window.__CoralieBoot && window.__CoralieBoot.stage('Coralie library loaded')"
+  onerror="window.__CoralieBoot && window.__CoralieBoot.error(new Error('Could not load ./index.global.js'), 'Library load failed')"
+></script>
 <script>
 // ============================================================================
 // GAME SCAFFOLD — single-file P2P game client (menu / answering / voting).
@@ -997,7 +1124,7 @@ function messageApplies(msg, state) {
 // ============================================================
 // PORTABLE HOST + STORAGE
 // ============================================================
-let Coralie = null;
+let coralieHost = null;
 const coralieUnsubscribers = [];
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
@@ -1029,13 +1156,13 @@ function getCoralieHost() {
 
 const Storage = {
   async get(name) {
-    if (!Coralie) throw new Error("Coralie host is not initialized");
-    return Coralie.storage.getItem(name);
+    if (!coralieHost) throw new Error("Coralie host is not initialized");
+    return coralieHost.storage.getItem(name);
   },
 
   async set(name, value) {
-    if (!Coralie) throw new Error("Coralie host is not initialized");
-    await Coralie.storage.setItem(name, String(value));
+    if (!coralieHost) throw new Error("Coralie host is not initialized");
+    await coralieHost.storage.setItem(name, String(value));
   },
 };
 
@@ -1052,8 +1179,8 @@ const Bridge = {
   },
 
   async sendTo(pubkeyHex, msg) {
-    if (!Coralie) throw new Error("Coralie host is not initialized");
-    return Coralie.sendMessage(
+    if (!coralieHost) throw new Error("Coralie host is not initialized");
+    return coralieHost.sendMessage(
       pubkeyHex,
       Bridge.encode(JSON.stringify(msg.toWire())),
     );
@@ -1866,8 +1993,8 @@ const Actions = {
 
   // --- not game messages, but still go through Actions for consistency ---
   async addPeer(pubkeyHex) {
-    if (!Coralie) throw new Error("Coralie host is not initialized");
-    await Coralie.addPeer(pubkeyHex);
+    if (!coralieHost) throw new Error("Coralie host is not initialized");
+    await coralieHost.addPeer(pubkeyHex);
     // no dispatch: connection state arrives via onPeers(), not here
   },
 
@@ -2455,22 +2582,39 @@ function subscribeToCoralie(host) {
 // INIT — the single bootstrap sequence.
 // ============================================================
 async function init() {
+  const Boot = window.__CoralieBoot;
+
+  Boot?.stage("Caching interface elements…");
   cacheEl();
+
+  Boot?.stage("Building configuration controls…");
   buildConfigOptions();
   Render.configOptions();
   Render.configWidgets();
+
+  Boot?.stage("Attaching interface listeners…");
   wireStaticListeners();
   wireDelegatedListeners();
 
-  Coralie = await getCoralieHost();
-  GameState.myPubkeyHex = await Coralie.getPubkey();
+  Boot?.stage("Connecting to Coralie host…");
+  coralieHost = getCoralieHost();
+
+  Boot?.stage("Loading node identity…");
+  GameState.myPubkeyHex = await coralieHost.getPubkey();
+
+  Boot?.stage("Loading saved username…");
   GameState.myUsername = await Storage.get("username");
 
-  const initialPeers = await Coralie.getPeers();
+  Boot?.stage("Loading connected peers…");
+  const initialPeers = await coralieHost.getPeers();
   reconcilePeers(initialPeers);
-  subscribeToCoralie(Coralie);
 
+  Boot?.stage("Subscribing to mesh events…");
+  subscribeToCoralie(coralieHost);
+
+  Boot?.stage("Rendering menu…");
   Render.draw(GameState);
+  Boot?.ready();
 }
 
 window.addEventListener("pagehide", (event) => {
@@ -2485,6 +2629,7 @@ window.addEventListener("pagehide", (event) => {
 // ============================================================
 init().catch((error) => {
   console.error("[Round the World] initialization failed", error);
+  window.__CoralieBoot?.error(error, "Round the World failed to start");
 });
 </script>
 </body>
