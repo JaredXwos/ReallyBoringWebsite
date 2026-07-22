@@ -276,11 +276,7 @@
     <div id="log"></div>
   </section>
 
-<!--
-  Platform bootstrap:
-  - Android WebView injects bridge.js at document start and defines window.Coralie.
-  - A regular browser loads ./index.global.js only when window.Coralie is absent.
--->
+<script src="./index.global.js"></script>
 <script>
 (function () {
   "use strict";
@@ -334,6 +330,10 @@
   function isCoralieHost(value) {
     return Boolean(
       value &&
+      value.storage &&
+      typeof value.storage.getItem === "function" &&
+      typeof value.storage.setItem === "function" &&
+      typeof value.storage.removeItem === "function" &&
       typeof value.getPubkey === "function" &&
       typeof value.addPeer === "function" &&
       typeof value.sendMessage === "function" &&
@@ -347,57 +347,13 @@
   }
 
   // ---- platform bootstrap ----
-  function loadBrowserBundle() {
-    return new Promise(function (resolve, reject) {
-      const existing = document.querySelector('script[data-coralie-browser-bundle="true"]');
-
-      if (existing) {
-        existing.addEventListener("load", resolve, { once: true });
-        existing.addEventListener(
-          "error",
-          function () {
-            reject(new Error("Failed to load ./index.global.js"));
-          },
-          { once: true }
-        );
-        return;
-      }
-
-      const script = document.createElement("script");
-      script.src = "./index.global.js";
-      script.async = false;
-      script.dataset.coralieBrowserBundle = "true";
-      script.onload = resolve;
-      script.onerror = function () {
-        reject(
-          new Error(
-            "window.Coralie was not injected and ./index.global.js could not be loaded"
-          )
-        );
-      };
-
-      document.head.appendChild(script);
-    });
-  }
-
-  async function resolveCoralieHost() {
-    // Android bridge.js installs this before page scripts execute.
-    if (isCoralieHost(window.Coralie)) {
-      log("info", "Using injected Coralie host");
-      return window.Coralie;
-    }
-
-    // Normal browser: load the compiled global bundle from this HTML file's folder.
-    log("info", "No injected host found; loading ./index.global.js");
-    await loadBrowserBundle();
-
+  function resolveCoralieHost() {
     if (!isCoralieHost(window.Coralie)) {
       throw new Error(
-        "./index.global.js loaded but did not install a valid window.Coralie"
+        "window.Coralie is unavailable; load ./index.global.js or use the Android WebView bridge"
       );
     }
 
-    log("info", "Using browser Coralie host");
     return window.Coralie;
   }
 
@@ -618,26 +574,34 @@
     }
   }
 
+  // ---- portable storage ----
+  const RoomStorage = {
+    async get(name) {
+      if (!coralie) throw new Error("Coralie host is not initialized");
+      return coralie.storage.getItem(name);
+    },
+
+    async set(name, value) {
+      if (!coralie) throw new Error("Coralie host is not initialized");
+      await coralie.storage.setItem(name, String(value));
+    },
+  };
+
   // ---- username ----
-  function loadUsername() {
-    try {
-      const value = localStorage.getItem("username");
-      myUsername = value || null;
-      el.usernameInput.value = value || "";
-    } catch {
-      myUsername = null;
-      log("info", "Username storage unavailable");
-    }
+  async function loadUsername() {
+    const value = await RoomStorage.get("username");
+    myUsername = value || null;
+    el.usernameInput.value = value || "";
   }
 
-  function saveUsername() {
+  async function saveUsername() {
     const name = el.usernameInput.value.trim();
     if (!name) return;
 
     el.saveUsernameBtn.disabled = true;
 
     try {
-      localStorage.setItem("username", name);
+      await RoomStorage.set("username", name);
       myUsername = name;
       log("info", "Username saved: " + name);
       announceUsernameToAllPeers();
@@ -687,6 +651,7 @@
 
     try {
       coralie = await resolveCoralieHost();
+      await loadUsername();
       myPubkeyHex = await coralie.getPubkey();
       el.myPubkey.textContent = myPubkeyHex;
 
@@ -742,7 +707,6 @@
   window.addEventListener("pagehide", cleanup, { once: true });
 
   // ---- init ----
-  loadUsername();
   void initialise();
 })();
 </script>

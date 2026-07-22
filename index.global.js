@@ -4452,15 +4452,73 @@ var CoralieCore = (() => {
     return manager;
   }
 
+  // src/coralie/browser-coralie-storage.ts
+  function resolveLocalStorage() {
+    if (typeof window === "undefined") return null;
+    try {
+      const storage = window.localStorage;
+      if (!storage) return null;
+      const probeKey = "__coralie_storage_probe__";
+      storage.setItem(probeKey, "1");
+      storage.removeItem(probeKey);
+      return storage;
+    } catch {
+      return null;
+    }
+  }
+  var BrowserCoralieStorage = class {
+    constructor(backend = resolveLocalStorage()) {
+      this.memoryFallback = /* @__PURE__ */ new Map();
+      this.backend = backend;
+    }
+    async getItem(key) {
+      const normalisedKey = String(key);
+      if (this.backend) {
+        try {
+          return this.backend.getItem(normalisedKey);
+        } catch {
+          this.backend = null;
+        }
+      }
+      return this.memoryFallback.get(normalisedKey) ?? null;
+    }
+    async setItem(key, value) {
+      const normalisedKey = String(key);
+      const normalisedValue = String(value);
+      if (this.backend) {
+        try {
+          this.backend.setItem(normalisedKey, normalisedValue);
+          return;
+        } catch {
+          this.backend = null;
+        }
+      }
+      this.memoryFallback.set(normalisedKey, normalisedValue);
+    }
+    async removeItem(key) {
+      const normalisedKey = String(key);
+      if (this.backend) {
+        try {
+          this.backend.removeItem(normalisedKey);
+          return;
+        } catch {
+          this.backend = null;
+        }
+      }
+      this.memoryFallback.delete(normalisedKey);
+    }
+  };
+
   // src/coralie/browser-coralie-host.ts
   var BrowserCoralieHost = class {
-    constructor(options = {}, managerFactory = createLiveConnectionManager) {
+    constructor(options = {}, managerFactory = createLiveConnectionManager, storage = new BrowserCoralieStorage()) {
       this.peersListeners = /* @__PURE__ */ new Set();
       this.messageListeners = /* @__PURE__ */ new Set();
       this.failureListeners = /* @__PURE__ */ new Set();
       this.managerUnsubscribers = [];
       this.currentPeers = [];
       this.closed = false;
+      this.storage = storage;
       this.options = options;
       this.managerFactory = managerFactory;
       this.manager = this.managerFactory(this.options);
