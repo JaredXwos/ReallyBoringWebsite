@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>Round the World</title>
+<title>Really Boring Website</title>
 <style>
   /* ============================================================
      SHARED — tokens, resets, and base elements used by all three
@@ -387,10 +387,16 @@
   .vote-btn.selected.correct { background: var(--accent-dim); color: var(--accent); }
   .vote-btn.selected.negative { background: var(--warn-dim); color: var(--warn); }
 
-  .your-answer-tag {
+  .your-answer-tag,
+  .no-answer-tag {
     font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;
-    color: var(--accent); background: var(--accent-dim); border: 1px solid var(--accent-dim);
     border-radius: 8px; padding: 8px 0; text-align: center;
+  }
+  .your-answer-tag {
+    color: var(--accent); background: var(--accent-dim); border: 1px solid var(--accent-dim);
+  }
+  .no-answer-tag {
+    color: var(--text-muted); background: var(--panel-2); border: 1px solid var(--border);
   }
 
   .a-stats { display: flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
@@ -453,7 +459,7 @@
 
   <div id="boot-diagnostics" role="status" aria-live="polite">
     <div class="boot-card">
-      <div class="boot-title">Starting Round the World</div>
+      <div class="boot-title">Starting Really Boring Website</div>
       <div class="boot-stage" id="boot-stage">Preparing page…</div>
       <pre class="boot-detail" id="boot-detail"></pre>
       <div class="boot-actions">
@@ -548,8 +554,8 @@
   <div class="screen" data-screen="menu">
     <div id="home-topbar">
       <div class="title">
-        <div class="eyebrow">Coralie · Room</div>
-        <div class="name">Round the World</div>
+        <div class="eyebrow">Coralie · Word Games</div>
+        <div class="name">Really Boring Website</div>
       </div>
       <div class="conn-indicator">
         <div class="peer-pill" id="gear-pill-target">
@@ -1515,6 +1521,10 @@ function reduceVotingStage(state, msg) {
 }
 
 function reduceVote(state, msg, meta) {
+  // Blank answers are not votable. Enforce this in the reducer as well as
+  // the UI so votes from older or modified clients cannot affect scoring.
+  if (!hasSubmittedAnswer(state, msg.questionIndex, msg.answerOwnerPubkeyHex)) return;
+
   const voter = meta.from;
   const key = `${msg.questionIndex}:${msg.answerOwnerPubkeyHex}:${voter}`;
   const existing = state.votes.get(key);
@@ -1541,7 +1551,14 @@ function resetToMenu(state) {
 // Shared by reduceNext's own-score accumulation AND Render.voting's live
 // per-answer display — one definition of "how many points has this answer
 // gotten so far," used everywhere that needs it.
+function hasSubmittedAnswer(state, questionIndex, ownerPubkeyHex) {
+  const entry = state.answers.get(`${questionIndex}:${ownerPubkeyHex}`);
+  return Boolean(entry && typeof entry.input === "string" && entry.input.trim().length > 0);
+}
+
 function sumVotesForAnswer(state, questionIndex, ownerPubkeyHex) {
+  if (!hasSubmittedAnswer(state, questionIndex, ownerPubkeyHex)) return 0;
+
   let total = 0;
   for (const [key, entry] of state.votes.entries()) {
     const [qIdx, owner] = key.split(":");
@@ -1550,6 +1567,8 @@ function sumVotesForAnswer(state, questionIndex, ownerPubkeyHex) {
   return total;
 }
 function countVotesForAnswer(state, questionIndex, ownerPubkeyHex) {
+  if (!hasSubmittedAnswer(state, questionIndex, ownerPubkeyHex)) return 0;
+
   let count = 0;
   for (const [key] of state.votes.entries()) {
     const [qIdx, owner] = key.split(":");
@@ -1980,6 +1999,8 @@ const Actions = {
   },
 
   castVote(questionIndex, answerOwnerPubkeyHex, value) {
+    if (!hasSubmittedAnswer(GameState, questionIndex, answerOwnerPubkeyHex)) return;
+
     const msg = new VoteMessage({ gameId: GameState.gameId, questionIndex, answerOwnerPubkeyHex, value, ts: Date.now() });
     dispatch(msg, { origin: "local", from: GameState.myPubkeyHex });
     Bridge.broadcastToAllPeers(msg);
@@ -2211,6 +2232,7 @@ const Render = {
     for (const ownerPubkeyHex of state.participants) {
       const answerEntry = state.answers.get(`${state.questionIndex}:${ownerPubkeyHex}`);
       const answerText = answerEntry?.input?.trim() || "(no answer)";
+      const hasAnswer = hasSubmittedAnswer(state, state.questionIndex, ownerPubkeyHex);
       const isSelf = ownerPubkeyHex === state.myPubkeyHex;
 
       const row = document.createElement("div");
@@ -2232,51 +2254,58 @@ const Render = {
       const rightDiv = document.createElement("div");
       rightDiv.className = "a-right";
 
-      if (isSelf) {
+      if (!hasAnswer) {
         const tag = document.createElement("div");
-        tag.className = "your-answer-tag";
-        tag.textContent = "Your answer";
+        tag.className = "no-answer-tag";
+        tag.textContent = "No answer";
         rightDiv.appendChild(tag);
       } else {
-        const track = document.createElement("div");
-        track.className = "vote-track";
-        const myVote = state.votes.get(`${state.questionIndex}:${ownerPubkeyHex}:${state.myPubkeyHex}`)?.value;
-        for (const value of [-2, -1, 0, 1, 2]) {
-          const btn = document.createElement("button");
-          btn.className = "vote-btn";
-          btn.dataset.value = String(value);
-          btn.textContent = (value > 0 ? "+" : "") + String(value); // "-0" for 0, matching the mockup
-          if (value === 0) btn.textContent = "-0";
-          if (myVote === value) {
-            btn.classList.add("selected");
-            if (value > 0) btn.classList.add("correct");
-            if (value < 0) btn.classList.add("negative");
-            // value === 0 gets neither — stays visually neutral/"transparent"
+        if (isSelf) {
+          const tag = document.createElement("div");
+          tag.className = "your-answer-tag";
+          tag.textContent = "Your answer";
+          rightDiv.appendChild(tag);
+        } else {
+          const track = document.createElement("div");
+          track.className = "vote-track";
+          const myVote = state.votes.get(`${state.questionIndex}:${ownerPubkeyHex}:${state.myPubkeyHex}`)?.value;
+          for (const value of [-2, -1, 0, 1, 2]) {
+            const btn = document.createElement("button");
+            btn.className = "vote-btn";
+            btn.dataset.value = String(value);
+            btn.textContent = (value > 0 ? "+" : "") + String(value); // "-0" for 0, matching the mockup
+            if (value === 0) btn.textContent = "-0";
+            if (myVote === value) {
+              btn.classList.add("selected");
+              if (value > 0) btn.classList.add("correct");
+              if (value < 0) btn.classList.add("negative");
+              // value === 0 gets neither — stays visually neutral/"transparent"
+            }
+            track.appendChild(btn);
           }
-          track.appendChild(btn);
+          rightDiv.appendChild(track);
         }
-        rightDiv.appendChild(track);
+
+        const points = sumVotesForAnswer(state, state.questionIndex, ownerPubkeyHex);
+        const votesCast = countVotesForAnswer(state, state.questionIndex, ownerPubkeyHex);
+        const eligibleVoters = state.participants.length - 1; // everyone except the answer's own author
+
+        const stats = document.createElement("div");
+        stats.className = "a-stats";
+        const pointsSpan = document.createElement("span");
+        pointsSpan.className = "a-points" + (points > 0 ? " correct" : "");
+        pointsSpan.textContent = (points > 0 ? "+" : "") + String(points);
+        const sep = document.createElement("span");
+        sep.className = "a-sep";
+        sep.textContent = "·";
+        const votesSpan = document.createElement("span");
+        votesSpan.className = "a-votes" + (votesCast === eligibleVoters ? " correct" : "");
+        votesSpan.textContent = `${votesCast}/${eligibleVoters} voted`;
+        stats.appendChild(pointsSpan);
+        stats.appendChild(sep);
+        stats.appendChild(votesSpan);
+        rightDiv.appendChild(stats);
       }
-
-      const points = sumVotesForAnswer(state, state.questionIndex, ownerPubkeyHex);
-      const votesCast = countVotesForAnswer(state, state.questionIndex, ownerPubkeyHex);
-      const eligibleVoters = state.participants.length - 1; // everyone except the answer's own author
-
-      const stats = document.createElement("div");
-      stats.className = "a-stats";
-      const pointsSpan = document.createElement("span");
-      pointsSpan.className = "a-points" + (points > 0 ? " correct" : "");
-      pointsSpan.textContent = (points > 0 ? "+" : "") + String(points);
-      const sep = document.createElement("span");
-      sep.className = "a-sep";
-      sep.textContent = "·";
-      const votesSpan = document.createElement("span");
-      votesSpan.className = "a-votes" + (votesCast === eligibleVoters ? " correct" : "");
-      votesSpan.textContent = `${votesCast}/${eligibleVoters} voted`;
-      stats.appendChild(pointsSpan);
-      stats.appendChild(sep);
-      stats.appendChild(votesSpan);
-      rightDiv.appendChild(stats);
 
       row.appendChild(rightDiv);
       El.voting.answersScroll.appendChild(row);
@@ -2628,8 +2657,8 @@ window.addEventListener("pagehide", (event) => {
 // BOOTSTRAP
 // ============================================================
 init().catch((error) => {
-  console.error("[Round the World] initialization failed", error);
-  window.__CoralieBoot?.error(error, "Round the World failed to start");
+  console.error("[Really Boring Website] initialization failed", error);
+  window.__CoralieBoot?.error(error, "Really Boring Website failed to start");
 });
 </script>
 </body>
