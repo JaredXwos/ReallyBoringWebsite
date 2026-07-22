@@ -784,7 +784,7 @@
       <section class="block">
         <h2>Username</h2>
         <div class="row">
-          <input type="text" class="sans" id="username-input" placeholder="Your name" value="Shishamo" />
+          <input type="text" class="sans" id="username-input" placeholder="Your name" />
           <button class="primary" style="flex:0 0 auto;" id="save-username-btn">Save</button>
         </div>
         <div class="hint">Stored on this device and announced to peers you connect to.</div>
@@ -1762,10 +1762,8 @@ function dispatch(msg, meta) {
 // nobody else fetches anything.
 //
 // Ported from server.js's axios+cheerio parsing to fetch+DOMParser.
-// Assumes the Room WebView allows a plain fetch() to an external
-// domain, separate from the mesh channel — bridge-api.md doesn't
-// document this either way, worth confirming with whoever owns
-// the native side if this doesn't work in practice.
+// Assumes the Coralie WebView allows a plain fetch() to an external
+// domain, separate from the mesh channel.
 //
 // server.js also built a tag system (^tag syntax, ticked/crossed
 // filtering) for the Bank screen's tag-selection UI. That parsing
@@ -2511,9 +2509,20 @@ function wireStaticListeners() {
   });
   El.voting.nextBtn.addEventListener("click", () => Actions.next());
 
-  El.overlay.saveUsernameBtn.addEventListener("click", () => {
+  El.overlay.saveUsernameBtn.addEventListener("click", async () => {
     const name = El.overlay.usernameInput.value.trim();
-    if (name) Actions.saveUsername(name);
+    if (!name) return;
+
+    try {
+      await Actions.saveUsername(name);
+      El.overlay.usernameInput.value = name;
+      console.info(`[RBW] Saved username: ${name}`);
+      Render.menu(GameState);
+      Render.overlay();
+    } catch (error) {
+      console.error("[RBW] Couldn't save username", error);
+      alert(`Couldn't save username: ${error?.message || error}`);
+    }
   });
   El.overlay.addPeerBtn.addEventListener("click", () => {
     const pk = El.overlay.peerInput.value.trim();
@@ -2633,6 +2642,12 @@ async function init() {
 
   Boot?.stage("Loading saved username…");
   GameState.myUsername = await Storage.get("username");
+  if (GameState.myUsername) {
+    El.overlay.usernameInput.value = GameState.myUsername;
+    console.info(`[RBW] Restored username: ${GameState.myUsername}`);
+  } else {
+    console.info("[RBW] No saved username found");
+  }
 
   Boot?.stage("Loading connected peers…");
   const initialPeers = await coralieHost.getPeers();
