@@ -4452,157 +4452,164 @@ var CoralieCore = (() => {
     return manager;
   }
 
-  // src/coralie/browser-coralie-storage.ts
-  function resolveLocalStorage() {
-    if (typeof window === "undefined") return null;
-    try {
-      const storage = window.localStorage;
-      if (!storage) return null;
-      const probeKey = "__coralie_storage_probe__";
-      storage.setItem(probeKey, "1");
-      storage.removeItem(probeKey);
-      return storage;
-    } catch {
-      return null;
-    }
-  }
-  var BrowserCoralieStorage = class {
-    constructor(backend = resolveLocalStorage()) {
-      this.memoryFallback = /* @__PURE__ */ new Map();
-      this.backend = backend;
-    }
-    async getItem(key) {
-      const normalisedKey = String(key);
-      if (this.backend) {
-        try {
-          return this.backend.getItem(normalisedKey);
-        } catch {
-          this.backend = null;
-        }
-      }
-      return this.memoryFallback.get(normalisedKey) ?? null;
-    }
-    async setItem(key, value) {
-      const normalisedKey = String(key);
-      const normalisedValue = String(value);
-      if (this.backend) {
-        try {
-          this.backend.setItem(normalisedKey, normalisedValue);
-          return;
-        } catch {
-          this.backend = null;
-        }
-      }
-      this.memoryFallback.set(normalisedKey, normalisedValue);
-    }
-    async removeItem(key) {
-      const normalisedKey = String(key);
-      if (this.backend) {
-        try {
-          this.backend.removeItem(normalisedKey);
-          return;
-        } catch {
-          this.backend = null;
-        }
-      }
-      this.memoryFallback.delete(normalisedKey);
-    }
-  };
-
   // src/coralie/browser-coralie-host.ts
+  var PUBKEY_PATTERN = /^[0-9a-fA-F]{64}$/;
   var BrowserCoralieHost = class {
-    constructor(options = {}, managerFactory = createLiveConnectionManager, storage = new BrowserCoralieStorage()) {
-      this.peersListeners = /* @__PURE__ */ new Set();
-      this.messageListeners = /* @__PURE__ */ new Set();
-      this.failureListeners = /* @__PURE__ */ new Set();
+    constructor(options = {}, managerFactory = createLiveConnectionManager) {
       this.managerUnsubscribers = [];
       this.currentPeers = [];
+      this.memoryStorage = /* @__PURE__ */ new Map();
+      this.timers = /* @__PURE__ */ new Map();
       this.closed = false;
-      this.storage = storage;
       this.options = options;
       this.managerFactory = managerFactory;
       this.manager = this.managerFactory(this.options);
       this.bindManager();
     }
-    async getPubkey() {
+    apiVersion() {
+      return 2;
+    }
+    hostKind() {
+      return "browser";
+    }
+    getPubkey() {
       this.assertOpen();
       return this.manager.myPubkeyHex;
     }
-    async addPeer(pubkeyHex) {
+    addPeer(pubkeyHex) {
       this.assertOpen();
-      this.manager.addPeer(pubkeyHex);
+      this.assertPubkey(pubkeyHex, "pubkeyHex");
+      this.manager.addPeer(pubkeyHex.toLowerCase());
     }
-    async sendMessage(toPubkeyHex, payload) {
+    sendMessage(toPubkeyHex, payload) {
       this.assertOpen();
+      this.assertPubkey(toPubkeyHex, "toPubkeyHex");
       if (!(payload instanceof Uint8Array)) {
         throw new TypeError("payload must be a Uint8Array");
       }
-      const connected = this.currentPeers.some((peer) => peer.pubkeyHex === toPubkeyHex);
-      if (!connected) {
-        throw new Error(`Peer is not connected: ${toPubkeyHex}`);
-      }
-      this.manager.sendToPeer(toPubkeyHex, payload);
+      const normalizedPubkey = toPubkeyHex.toLowerCase();
+      const connected = this.currentPeers.some((peer) => peer.pubkeyHex === normalizedPubkey);
+      if (!connected) throw new Error(`Peer is not connected: ${normalizedPubkey}`);
+      this.manager.sendToPeer(normalizedPubkey, new Uint8Array(payload));
     }
-    async getPeers() {
+    getPeersJson() {
       this.assertOpen();
-      return this.clonePeers(this.currentPeers);
+      return JSON.stringify(this.clonePeers(this.currentPeers));
     }
-    async reset() {
-      this.assertOpen();
+    reset() {
       const nextManager = this.managerFactory(this.options);
       this.unbindManager();
-      this.manager.close();
+      if (!this.closed) this.manager.close();
       this.manager = nextManager;
+      this.currentPeers = [];
+      this.closed = false;
       this.bindManager();
       return this.manager.myPubkeyHex;
     }
-    async close() {
+    close() {
       if (this.closed) return;
       this.closed = true;
       this.unbindManager();
       this.manager.close();
       this.currentPeers = [];
+      this.dispatch("coralie:peers", []);
     }
-    onPeers(listener) {
-      this.assertOpen();
-      this.peersListeners.add(listener);
-      listener(this.clonePeers(this.currentPeers));
-      return () => {
-        this.peersListeners.delete(listener);
-      };
+    storageGetItem(key) {
+      const normalizedKey = String(key);
+      const storage = this.resolveLocalStorage();
+      if (storage) {
+        try {
+          return storage.getItem(normalizedKey);
+        } catch {
+        }
+      }
+      return this.memoryStorage.get(normalizedKey) ?? null;
     }
-    onMessage(listener) {
-      this.assertOpen();
-      this.messageListeners.add(listener);
-      return () => {
-        this.messageListeners.delete(listener);
-      };
+    storageSetItem(key, value) {
+      const normalizedKey = String(key);
+      const normalizedValue = String(value);
+      const storage = this.resolveLocalStorage();
+      if (storage) {
+        try {
+          storage.setItem(normalizedKey, normalizedValue);
+          return;
+        } catch {
+        }
+      }
+      this.memoryStorage.set(normalizedKey, normalizedValue);
     }
-    onTerminalFailure(listener) {
-      this.assertOpen();
-      this.failureListeners.add(listener);
-      return () => {
-        this.failureListeners.delete(listener);
+    storageRemoveItem(key) {
+      const normalizedKey = String(key);
+      const storage = this.resolveLocalStorage();
+      if (storage) {
+        try {
+          storage.removeItem(normalizedKey);
+        } catch {
+        }
+      }
+      this.memoryStorage.delete(normalizedKey);
+    }
+    async httpRequestJson(requestJson) {
+      const request = this.parseHttpRequest(requestJson);
+      const response = await fetch(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: request.body === null ? void 0 : request.body
+      });
+      const result = {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        body: await response.text()
       };
+      return JSON.stringify(result);
+    }
+    timerQueue(id, delaySeconds, payload) {
+      if (!Number.isFinite(delaySeconds) || delaySeconds <= 0) {
+        throw new RangeError("delaySeconds must be positive");
+      }
+      const timerId = id == null || id === "" ? this.generateId() : String(id);
+      const normalizedPayload = payload == null ? null : String(payload);
+      this.timerCancel(timerId);
+      const deadlineMs = Date.now() + delaySeconds * 1e3;
+      const handle = setTimeout(() => {
+        this.timers.delete(timerId);
+        const detail = { id: timerId, payload: normalizedPayload };
+        this.dispatch("coralie:timerFired", detail);
+      }, delaySeconds * 1e3);
+      this.timers.set(timerId, { handle, deadlineMs, payload: normalizedPayload });
+      return timerId;
+    }
+    timerCancel(id) {
+      const timer = this.timers.get(String(id));
+      if (!timer) return;
+      clearTimeout(timer.handle);
+      this.timers.delete(String(id));
+    }
+    timerListJson() {
+      const now = Date.now();
+      const result = [...this.timers.entries()].map(([id, timer]) => ({
+        id,
+        remainingMs: Math.max(0, timer.deadlineMs - now)
+      }));
+      return JSON.stringify(result);
     }
     bindManager() {
       this.managerUnsubscribers = [
         this.manager.peers.subscribe((peers) => {
           this.currentPeers = this.normalisePeers(peers);
-          this.emitPeers(this.currentPeers);
+          this.dispatch("coralie:peers", this.clonePeers(this.currentPeers));
         }),
         this.manager.incomingMessages.subscribe((message) => {
-          this.emitMessage(this.normaliseMessage(message));
+          this.dispatch("coralie:message", this.normaliseMessage(message));
         }),
         this.manager.terminalFailures.subscribe((failure) => {
-          this.emitFailure(this.normaliseFailure(failure));
+          this.dispatch("coralie:terminalFailure", this.normaliseFailure(failure));
         })
       ];
     }
     unbindManager() {
-      for (const unsubscribe of this.managerUnsubscribers) {
-        unsubscribe();
-      }
+      for (const unsubscribe of this.managerUnsubscribers) unsubscribe();
       this.managerUnsubscribers = [];
     }
     normalisePeers(peers) {
@@ -4616,7 +4623,7 @@ var CoralieCore = (() => {
         fromPubkeyHex: message.from,
         toPubkeyHex: message.to,
         timestamp: message.timestamp,
-        payload: new Uint8Array(message.payload)
+        payload: Array.from(message.payload, (value) => value & 255)
       };
     }
     normaliseFailure(failure) {
@@ -4626,31 +4633,67 @@ var CoralieCore = (() => {
         reason: failure.reason
       };
     }
-    emitPeers(peers) {
-      for (const listener of this.peersListeners) {
-        listener(this.clonePeers(peers));
-      }
-    }
-    emitMessage(message) {
-      for (const listener of this.messageListeners) {
-        listener({
-          ...message,
-          payload: new Uint8Array(message.payload)
-        });
-      }
-    }
-    emitFailure(failure) {
-      for (const listener of this.failureListeners) {
-        listener({ ...failure });
-      }
+    dispatch(eventName, detail) {
+      window.dispatchEvent(new CustomEvent(eventName, { detail }));
     }
     clonePeers(peers) {
       return peers.map((peer) => ({ ...peer }));
     }
-    assertOpen() {
-      if (this.closed) {
-        throw new Error("Coralie host is closed");
+    resolveLocalStorage() {
+      try {
+        return window.localStorage || null;
+      } catch {
+        return null;
       }
+    }
+    parseHttpRequest(requestJson) {
+      let parsed;
+      try {
+        parsed = JSON.parse(requestJson);
+      } catch (error) {
+        throw new TypeError(`Invalid HTTP request JSON: ${String(error)}`);
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new TypeError("HTTP request must be an object");
+      }
+      const request = parsed;
+      if (typeof request.url !== "string" || request.url.trim() === "") {
+        throw new TypeError("HTTP request url must be a non-empty string");
+      }
+      const headers = {};
+      if (request.headers !== void 0) {
+        if (typeof request.headers !== "object" || request.headers === null || Array.isArray(request.headers)) {
+          throw new TypeError("HTTP request headers must be an object");
+        }
+        for (const [name, value] of Object.entries(request.headers)) {
+          if (typeof value !== "string") throw new TypeError(`HTTP header ${name} must be a string`);
+          headers[name] = value;
+        }
+      }
+      const body = request.body == null ? null : request.body;
+      if (body !== null && typeof body !== "string") {
+        throw new TypeError("HTTP request body must be a string or null");
+      }
+      return {
+        url: request.url.trim(),
+        method: (request.method || "GET").trim().toUpperCase(),
+        headers,
+        body
+      };
+    }
+    generateId() {
+      if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID();
+      }
+      return `timer-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+    assertPubkey(value, fieldName) {
+      if (!PUBKEY_PATTERN.test(value)) {
+        throw new TypeError(`${fieldName} must be a 64-character hexadecimal public key`);
+      }
+    }
+    assertOpen() {
+      if (this.closed) throw new Error("Coralie mesh is closed");
     }
   };
 
@@ -4658,9 +4701,7 @@ var CoralieCore = (() => {
   function installBrowserCoralie(options = {}) {
     if (typeof window === "undefined") return void 0;
     const target = window;
-    if (target.Coralie) {
-      return target.Coralie;
-    }
+    if (target.Coralie) return target.Coralie;
     const host = new BrowserCoralieHost(options);
     Object.defineProperty(target, "Coralie", {
       value: host,
@@ -4672,9 +4713,7 @@ var CoralieCore = (() => {
   }
 
   // src/index.ts
-  if (typeof window !== "undefined") {
-    installBrowserCoralie();
-  }
+  if (typeof window !== "undefined") installBrowserCoralie();
   return __toCommonJS(index_exports);
 })();
 /*! Bundled license information:

@@ -277,6 +277,7 @@
   </section>
 
 <script src="./index.global.js"></script>
+
 <script>
 (function () {
   "use strict";
@@ -327,34 +328,32 @@
     return error instanceof Error ? error.message : String(error);
   }
 
-  function isCoralieHost(value) {
-    return Boolean(
-      value &&
-      value.storage &&
-      typeof value.storage.getItem === "function" &&
-      typeof value.storage.setItem === "function" &&
-      typeof value.storage.removeItem === "function" &&
-      typeof value.getPubkey === "function" &&
-      typeof value.addPeer === "function" &&
-      typeof value.sendMessage === "function" &&
-      typeof value.getPeers === "function" &&
-      typeof value.reset === "function" &&
-      typeof value.close === "function" &&
-      typeof value.onPeers === "function" &&
-      typeof value.onMessage === "function" &&
-      typeof value.onTerminalFailure === "function"
-    );
-  }
+  function requireCoralie() {
+    const host = window.Coralie;
 
-  // ---- platform bootstrap ----
-  function resolveCoralieHost() {
-    if (!isCoralieHost(window.Coralie)) {
-      throw new Error(
-        "window.Coralie is unavailable; load ./index.global.js or use the Android WebView bridge"
-      );
+    if (!host || typeof host.apiVersion !== "function" || host.apiVersion() !== 2) {
+      throw new Error("Coralie API v2 is unavailable");
     }
 
-    return window.Coralie;
+    const requiredMethods = [
+      "getPubkey",
+      "addPeer",
+      "sendMessage",
+      "getPeersJson",
+      "storageGetItem",
+      "storageSetItem",
+      "storageRemoveItem",
+      "reset",
+      "close",
+    ];
+
+    for (const method of requiredMethods) {
+      if (typeof host[method] !== "function") {
+        throw new Error("window.Coralie." + method + " is unavailable");
+      }
+    }
+
+    return host;
   }
 
   // ---- byte helpers ----
@@ -454,7 +453,7 @@
     }
   }
 
-  // ---- CoralieHost event handling ----
+  // ---- native Coralie event handling ----
   function handlePeersEvent(peerList) {
     if (!Array.isArray(peerList)) {
       log("error", "Invalid peers event: expected an array");
@@ -574,22 +573,9 @@
     }
   }
 
-  // ---- portable storage ----
-  const RoomStorage = {
-    async get(name) {
-      if (!coralie) throw new Error("Coralie host is not initialized");
-      return coralie.storage.getItem(name);
-    },
-
-    async set(name, value) {
-      if (!coralie) throw new Error("Coralie host is not initialized");
-      await coralie.storage.setItem(name, String(value));
-    },
-  };
-
   // ---- username ----
   async function loadUsername() {
-    const value = await RoomStorage.get("username");
+    const value = await coralie.storageGetItem("username");
     myUsername = value || null;
     el.usernameInput.value = value || "";
   }
@@ -601,7 +587,7 @@
     el.saveUsernameBtn.disabled = true;
 
     try {
-      await RoomStorage.set("username", name);
+      await coralie.storageSetItem("username", name);
       myUsername = name;
       log("info", "Username saved: " + name);
       announceUsernameToAllPeers();
@@ -647,26 +633,49 @@
 
   // ---- lifecycle ----
   async function initialise() {
-    log("info", "Coralie Room initialized");
+    log("info", "Coralie Room initialized (native-only)");
 
     try {
-      coralie = await resolveCoralieHost();
+      coralie = requireCoralie();
       await loadUsername();
       myPubkeyHex = await coralie.getPubkey();
       el.myPubkey.textContent = myPubkeyHex;
 
+      const peersListener = function (event) {
+        handlePeersEvent(event.detail);
+      };
+      const messageListener = function (event) {
+        const detail = event.detail && typeof event.detail === "object"
+          ? event.detail
+          : {};
+        handleMessageEvent({
+          ...detail,
+          payload: detail.payload instanceof Uint8Array
+            ? detail.payload
+            : Uint8Array.from(detail.payload || []),
+        });
+      };
+      const failureListener = function (event) {
+        handleTerminalFailureEvent(event.detail);
+      };
+
+      window.addEventListener("coralie:peers", peersListener);
+      window.addEventListener("coralie:message", messageListener);
+      window.addEventListener("coralie:terminalFailure", failureListener);
       unsubscribers.push(
-        coralie.onPeers(handlePeersEvent),
-        coralie.onMessage(handleMessageEvent),
-        coralie.onTerminalFailure(handleTerminalFailureEvent)
+        function () { window.removeEventListener("coralie:peers", peersListener); },
+        function () { window.removeEventListener("coralie:message", messageListener); },
+        function () { window.removeEventListener("coralie:terminalFailure", failureListener); }
       );
 
-      // Refresh from the explicit snapshot as well. This is harmless when
-      // onPeers already replays the current state.
-      handlePeersEvent(await coralie.getPeers());
+      const initialPeers = JSON.parse(await coralie.getPeersJson());
+      if (!Array.isArray(initialPeers)) {
+        throw new TypeError("Coralie.getPeersJson() did not return an array");
+      }
+      handlePeersEvent(initialPeers);
 
       log("info", "Public key: " + shortKey(myPubkeyHex));
-      log("info", "Coralie host ready");
+      log("info", "Coralie host ready (" + coralie.hostKind() + ")");
     } catch (error) {
       el.myPubkey.textContent = "unavailable";
       el.addPeerBtn.disabled = true;
@@ -686,9 +695,11 @@
     }
 
     if (coralie) {
-      void coralie.close().catch(function (error) {
+      try {
+        coralie.close();
+      } catch (error) {
         console.error("Failed to close Coralie host:", error);
-      });
+      }
     }
   }
 
